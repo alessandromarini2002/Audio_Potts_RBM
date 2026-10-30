@@ -1,4 +1,4 @@
-# Cartelle di dati, log e risultati da escludere
+# Escludi dataset e componenti esterni/pesanti
 DATA/
 RUNS/
 WavTokenizer/
@@ -8,7 +8,3 @@ WavTokenizer/
 __pycache__/
 .env
 .ipynb_checkpoints/
-
-# Pesi pre-addestrati, checkpoint e file binari/tensori
-*.pt
-*.ckpt
