@@ -1,0 +1,14 @@
+# Cartelle di dati, log e risultati da escludere
+DATA/
+RUNS/
+WavTokenizer/
+
+# File di log e cache di Python
+*.log
+__pycache__/
+.env
+.ipynb_checkpoints/
+
+# Pesi pre-addestrati, checkpoint e file binari/tensori
+*.pt
+*.ckpt
