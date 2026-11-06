@@ -88,13 +88,8 @@ class PottsRBM:
         v_onehot = F.one_hot(idx, num_classes=n_states).float()
         return p_v, idx, v_onehot
 
-    def contrastive_divergence(self, v_data_onehot, lr, k, persistent, weight_decay=0.0,mask=None):
+    def contrastive_divergence(self, v_data_onehot, lr, k, persistent, weight_decay=0.0):
         batch_size = v_data_onehot.shape[0]
-
-        if mask is not None:
-            mask_exp = mask.unsqueeze(-1) # (batch, sites, 1)
-            v_data_onehot = v_data_onehot * mask_exp
-
         p_h0, h0 = self.sample_h_given_v(v_data_onehot)
 
         if persistent:
@@ -106,9 +101,7 @@ class PottsRBM:
             for _ in range(k):
                 p_hk, h_k = self.sample_h_given_v(v_k_onehot)
                 p_vk, _, v_k_onehot = self.sample_v_given_h(h_k)
-                if mask is not None:
-                    v_k_onehot = v_k_onehot * mask_exp
-                self.persistent_v = v_k_onehot.detach()
+            self.persistent_v = v_k_onehot.detach()
         else:   # non-persistent CD -- swapped sampling order, as in previous versions
             v_k_onehot = v_data_onehot
             h_k = h0
@@ -116,43 +109,23 @@ class PottsRBM:
             for _ in range(k):
                 p_vk, _, v_k_onehot = self.sample_v_given_h(h_k)
                 p_hk, h_k = self.sample_h_given_v(v_k_onehot)
-                if mask is not None:
-                    v_k_onehot = v_k_onehot * mask_exp
 
         grad_W = (torch.einsum("bsk,bh->skh", v_data_onehot, p_h0)
                   - torch.einsum("bsk,bh->skh", v_k_onehot, p_hk)) / batch_size
-
-        if mask is not None:
-            grad_b = ((v_data_onehot - v_k_onehot) * mask_exp).mean(dim=0)
-            recon_diff = (v_data_onehot - p_vk) * mask_exp
-            recon_error = (recon_diff ** 2).sum() / mask.sum() # Media sui soli token validi
-        else:
-            grad_b = (v_data_onehot - v_k_onehot).mean(dim=0)
-            recon_error = ((v_data_onehot - p_vk) ** 2).mean()
-
+        grad_b = (v_data_onehot - v_k_onehot).mean(dim=0)
         grad_c = (p_h0 - p_hk).mean(dim=0)
 
-        # Calcoliamo l'effettivo aggiornamento dei pesi e lo salviamo nel modello
-        update_w = lr * (grad_W - weight_decay * self.W)
-        self.last_updates = update_w.detach() # Salviamo per il log
-
-        self.W += update_w
-        self.W = self.W * self.prune_mask.unsqueeze(1) # keep pruned blocks exactly at zero
+        self.W += lr * (grad_W - weight_decay * self.W)
+        self.W = self.W * self.prune_mask.unsqueeze(1)        # keep pruned blocks exactly at zero
         self.b += lr * grad_b
         self.c += lr * grad_c
 
-        return recon_error.item()
+        return ((v_data_onehot - p_vk) ** 2).mean().item()
 
-    def free_energy(self, v_onehot,mask=None):
-        term_visible = torch.einsum("bsk,sk->bs", v_onehot, self.b)
+    def free_energy(self, v_onehot):
+        term_visible = torch.einsum("bsk,sk->b", v_onehot, self.b)
         wx_c = torch.einsum("bsk,skh->bh", v_onehot, self.W) + self.c
         term_hidden = F.softplus(wx_c).sum(dim=1)
-
-        if mask is not None:
-            term_visible = (term_visible * mask).sum(dim=1)
-        else:
-            term_visible = term_visible.sum(dim=1)
-        
         fe = -term_visible - term_hidden
         return fe.mean()
         
@@ -228,12 +201,13 @@ def train(rbm, X_idx, n_epochs, batch_size, lr, k, persistent, n_states,
             if hasattr(rbm, 'c') and rbm.c is not None:
                 writer.add_histogram("hidden/bias_c", rbm.c, epoch)
 """                
-def train(rbm, X_idx, n_epochs, batch_size, lr, k, persistent, n_states,
+def train(rbm, X_idx, n_epochs, batch_size, lr, k, persistent, n_states, 
           weight_decay=0.0, writer=None, prune_schedule=None, X_val=None):
-
-    #Fixed lr and batch_size throughout (no schedule for either). prune_schedule:
-    #dict for cubic_prune_schedule() (None disables pruning). No checkpointing here.
-    #Include X_val per il monitoraggio della validazione e prevenzione overfitting.
+    """
+    Fixed lr and batch_size throughout (no schedule for either), prune_schedule:
+    dict for cubic_prune_schedule() (None disables pruning). No checkpointing here.
+    Include X_val and for monitoring validation and preventing overfitting.
+    """
     n = X_idx.shape[0]
     current_m = prune_schedule["n_start"] if prune_schedule is not None else rbm.n_sites
 
@@ -244,70 +218,63 @@ def train(rbm, X_idx, n_epochs, batch_size, lr, k, persistent, n_states,
             if target_m is not None and target_m != current_m:
                 rbm.prune_to(target_m)
                 current_m = target_m
-                print(f"[epoch {epoch + 1}] pruned to M={target_m} connections/hidden unit")
+                print(f"Epoch {epoch + 1} pruned to M={target_m} connections/hidden unit")
                 if writer is not None:
                     writer.add_scalar("train/active_connections", target_m, epoch)
 
-        ### one epoch of (P)CD over shuffled minibatches (Training)
-        X_shuffled = X_idx[torch.randperm(n, device=X_idx.device)]
+        ### One epoch of (P)CD over shuffled minibatches (Training)
+        perm = torch.randperm(n, device=X_idx.device)
+        X_shuffled = X_idx[perm]
         errors = []
         for start in tqdm(range(0, n, batch_size), desc=f"Epoch {epoch + 1}/{n_epochs}", leave=False):
-            batch_indices = X_shuffled[start:start + batch_size].to(X_idx.device)
-
-            # Generazione della maschera basata sul padding a zero
-            mask = (batch_indices != 0).float()
-
-            batch_onehot = F.one_hot(batch_indices, num_classes=n_states).float()
+            batch_onehot = F.one_hot(X_shuffled[start:start + batch_size], num_classes=n_states).float()
             errors.append(rbm.contrastive_divergence(batch_onehot, lr=lr, k=k,
-                                                     persistent=persistent, weight_decay=weight_decay, mask=mask))
+                                                     persistent=persistent, weight_decay=weight_decay))
         mean_err = float(np.mean(errors))
         if writer is not None:
             writer.add_scalar("train/recon_error", mean_err, epoch)
             # LOG DEGLI AGGIORNAMENTI DEI PESI
             if hasattr(rbm, 'last_updates'):
-                writer.add_histogram('weights/updates', rbm.last_updates, epoch)    
+                writer.add_histogram("weights/updates", rbm.last_updates, epoch)
 
-        ### --- VALIDATION STEP ---
+        ### --- VALIDATION STEP (Reconstruction Error) ---
         if X_val is not None:
             with torch.no_grad():
                 val_errors = []
                 n_val = X_val.shape[0]
                 for start_v in range(0, n_val, batch_size):
-                    batch_val = X_val[start_v:start_v + batch_size].to(X_val.device)
-                    mask_val = (batch_val != 0).float()
-
+                    end_v = min(start_v + batch_size, n_val)
+                    batch_val = X_val[start_v:end_v].to(X_idx.device)
                     batch_val_onehot = F.one_hot(batch_val, num_classes=n_states).float()
                     # Usiamo lr=0.0 per calcolare l'errore senza aggiornare i pesi
-                    val_err = rbm.contrastive_divergence(batch_val_onehot, lr=0.0, k=k,
-                                                         persistent=False, weight_decay=0.0, mask=mask_val)
+                    val_err = rbm.contrastive_divergence(batch_val_onehot, lr=0.0, k=k, 
+                                                         persistent=False, weight_decay=0.0)
                     val_errors.append(val_err)
-                
+
                 mean_val_err = float(np.mean(val_errors))
                 if writer is not None:
                     writer.add_scalar("val/recon_error", mean_val_err, epoch)
-        # -------------------------
+
         # --- CALCOLO ENERGIA LIBERA DI VALIDAZIONE ---
         if X_val is not None:
             val_fe_list = []
-            for start_in in range(0, n_val, batch_size):
-                batch_val = X_val[start_in:start_in + batch_size].to(X_val.device)
-                mask_val = (batch_val != 0).float()
+            for start_v in range(0, n_val, batch_size):
+                end_v = min(start_v + batch_size, n_val)
+                batch_val = X_val[start_v:end_v].to(X_idx.device)
                 batch_val_onehot = F.one_hot(batch_val, num_classes=n_states).float()
-                # Sfruttiamo la funzione free_energy già presente nella RBM
-                fe_val = rbm.free_energy(batch_val_onehot,mask=mask_val).item()
+                fe_val = rbm.free_energy(batch_val_onehot).item()
                 val_fe_list.append(fe_val)
-                
+
             mean_val_fe = float(np.mean(val_fe_list))
             if writer is not None:
-                writer.add_scalar('Free_Energy/val', mean_val_fe, epoch)
-            
+                writer.add_scalar("Free_Energy/val", mean_val_fe, epoch)
+
         # --- CALCOLO ENERGIA LIBERA DI TRAINING (sul batch corrente) ---
-        sample_batch = X_idx[:batch_size].to(X_idx.device)
-        train_mask = (sample_batch != 0).float()
+        sample_batch = X_shuffled[:batch_size].to(X_idx.device)
         train_onehot = F.one_hot(sample_batch, num_classes=n_states).float()
-        train_fe = rbm.free_energy(train_onehot, mask=train_mask).item()
+        train_fe = rbm.free_energy(train_onehot).item()
         if writer is not None:
-            writer.add_scalar('Free_Energy/train', train_fe, epoch)    
+            writer.add_scalar("Free_Energy/train", train_fe, epoch)
 
         # Monitoraggio dei pesi e delle attivazioni (ogni 10 epoche)
         if epoch % 10 == 0:
@@ -375,14 +342,13 @@ def _sample_visible_step(rbm, h, n_states, t, n_steps, sampling):
     return rbm.sample_v_given_h(h)
 
 
-def gibbs_chain_potts(rbm, n_sites, n_states, n_steps, seed, sampling="full_gibbs"):
+def gibbs_chain_potts(rbm, n_sites, n_states, n_steps, seed, sampling="cleanup"):
     """Single Gibbs chain. Returns (snapshots, energies): ~10 index snapshots and the free energy at each."""
     assert sampling in SAMPLING_MODES, f"sampling must be one of {SAMPLING_MODES}, got {sampling!r}"
     assert n_states == rbm.n_states, f"n_states={n_states} != rbm.n_states={rbm.n_states}"
     torch.manual_seed(seed)
     
-    idx = torch.randint(0, n_states, (1, n_sites), device=rbm.device)
-        
+    idx = torch.randint(0, n_states, (1, n_sites), device=rbm.device)    
     v_onehot = F.one_hot(idx, num_classes=n_states).float()
 
     snapshot_every = max(1, n_steps // 10)
@@ -396,14 +362,14 @@ def gibbs_chain_potts(rbm, n_sites, n_states, n_steps, seed, sampling="full_gibb
             energies.append(rbm.free_energy(v_onehot).item())
     return snapshots, energies
 
-def generate_to_tb(rbm, writer, n_samples, audio_model, cb, n_sites, n_states, 
-                   device, n_steps=500, tag_prefix="gibbs_chain", sampling="full_gibbs"):
+def generate_to_tb(rbm, writer, n_samples, audio_model, cb, kept_ids, n_sites, n_states, 
+                   device, n_steps=500, tag_prefix="gibbs_chain", sampling="cleanup"):
     # Modalità GENERAZIONE standard da rumore casuale
     for s in random.choices(range(1000), k=n_samples):
         snapshots, energies = gibbs_chain_potts(rbm, n_sites, n_states, n_steps=n_steps, seed=s, sampling=sampling)
         
         with torch.no_grad():
-            audio_waveform = decode_audio_tokens(cb, snapshots[-1], audio_model, device)
+            audio_waveform = decode_audio_tokens(cb,snapshots[-1], audio_model, device)
 
             writer.add_audio(f"{tag_prefix}/seed_{s}", audio_waveform, global_step=0, sample_rate=24000)
 
@@ -422,6 +388,8 @@ def generate_to_tb(rbm, writer, n_samples, audio_model, cb, n_sites, n_states,
                 writer.add_scalar(f"gen_free_energy/{tag_prefix}/seed_{s}", fe, int(step))
 
         writer.flush()
+
+
 def init_experiment(config_path):
     """
     Load the YAML config, set DEVICE, create LOG_PATH/EXPERIMENT_ID/{checkpoints,
@@ -473,32 +441,32 @@ def start_experiment(par):
     codewords_path = os.path.join(par["DATA_DIR"], "X2_idx.pt")
     if os.path.isfile(codewords_path):
         print("Loading precomputed codewords... ", end="")
-        loaded_data = torch.load(codewords_path)
-        if isinstance(loaded_data, tuple):
-            X_idx, masks = loaded_data
-        else:
-            X_idx = loaded_data
-            masks = None  # Fallback se il file vecchio conteneva solo X_idx    
+        X_idx = torch.load(codewords_path)
     else:
         print("Extracting audio tokens with WavTokenizer... ", end="")
-        X_idx, masks = extract_audio_tokens(par["DATA_DIR"], wavtokenizer_model, device)
-        torch.save((X_idx, masks), codewords_path)  # Salviamo la tupla completa
-        
+        X_idx = extract_audio_tokens(par["DATA_DIR"], wavtokenizer_model, device)
+        torch.save(X_idx, codewords_path)   
     print(f"done, {X_idx.shape[0]} samples")
-
-    ### vocabulary: "reduced" = one Potts state per codeword actually used (lossless), "full" = all of them
-    if par["VOCABULARY"] == "reduced":
-        kept_ids, compact_id = build_used_vocab(X_idx, n_states_full)
-    else:
-        kept_ids = compact_id = torch.arange(n_states_full)    # identity map: one state per codebook entry
-    n_states = kept_ids.numel()
-    X_idx = compact_id[X_idx].to(device)
-    cb = cb_full[kept_ids.to(device)]
 
     indices = torch.randperm(X_idx.shape[0])
     split_idx = int(0.8 * X_idx.shape[0])
+
     train_idx = X_idx[indices[:split_idx]]
     val_idx = X_idx[indices[split_idx:]]
+
+    ### vocabulary: "reduced" = one Potts state per codeword actually used (lossless), "full" = all of them
+    if par["VOCABULARY"] == "reduced":
+        kept_ids, compact_id = build_used_vocab(train_idx, n_states_full)
+    else:
+        kept_ids = compact_id = torch.arange(n_states_full)    # identity map: one state per codebook entry
+
+    n_states = kept_ids.numel()
+    train_idx = compact_id[train_idx].to(device)
+    # Mappa la validazione e gestisce eventuali token non visti nel training set (es. mappati a -1)
+    val_mapped = compact_id[val_idx]
+    val_mapped[val_mapped < 0] = 0  # Sostituisce i token sconosciuti con il token valido 0
+    val_idx = val_mapped.to(device)
+    cb = cb_full[kept_ids.to(device)]
     
     print(f"Dataset diviso: {train_idx.shape[0]} campioni di training, {val_idx.shape[0]} campioni di validazione.")
     print(f"Codebook: {n_states_full} entries, embedding dim {embed_dim} -> {n_states} Potts states (VOCABULARY: {par['VOCABULARY']})")
@@ -528,7 +496,7 @@ def start_experiment(par):
 
     if par["INIT_BIAS"]:
         print("Initializing visible bias from empirical codeword marginals...")
-        init_bias_from_marginals(rbm, X_idx, n_states)
+        init_bias_from_marginals(rbm, train_idx, n_states)
 
     ### pruning schedule (optional)
     prune_schedule = None
@@ -543,37 +511,22 @@ def start_experiment(par):
 
     ### training loop -- fixed LR, fixed batch size
     print("Start training...")
-    """
-    train(rbm,
-         X_idx,
-         n_epochs=par["N_EPOCHS"],
-         batch_size=par["BATCH_SIZE"],
-         lr=par["LR"],
-         k=par["K_TRAIN"],
-         persistent=par["PERSISTENT_CD"],
-         n_states=n_states,
-         weight_decay=par["WEIGHT_DECAY"],
-         writer=writer,
-         prune_schedule=prune_schedule)
-    """    
 
-    train(rbm,
-         train_idx,
-         n_epochs=par["N_EPOCHS"],
-         batch_size=par["BATCH_SIZE"],
-         lr=par["LR"],
-         k=par["K_TRAIN"],
-         persistent=par["PERSISTENT_CD"],
-         n_states=n_states,
-         weight_decay=par["WEIGHT_DECAY"],
-         writer=writer,
-         prune_schedule=prune_schedule,
-         X_val=val_idx)  
-    #ckpt_path = os.path.join(ckpt_dir, "model_final.pt")
-    ckpt_path = os.path.join(ckpt_dir, "model_final4.pt")
-    #ckpt_path = "RUNS/RBM_WavTokenizer/005/checkpoints/model_final2.pt"
-    #rbm, kept_ids = load_ckpt(ckpt_path, device)
-    #print(f"Modello caricato con successo da {ckpt_path}")
+    train(
+        rbm,
+        X_idx=train_idx,                
+        n_epochs=par["N_EPOCHS"],
+        batch_size=par["BATCH_SIZE"],
+        lr=par["LR"],
+        k=par["K_TRAIN"],
+        persistent=par["PERSISTENT_CD"],
+        n_states=n_states,
+        weight_decay=par["WEIGHT_DECAY"],
+        writer=writer,
+        prune_schedule=prune_schedule,
+        X_val=val_idx,            
+    )
+    ckpt_path = os.path.join(ckpt_dir, "model_final.pt")
     save_ckpt(rbm, ckpt_path, kept_ids)
 
     ### end-of-training sample audio
@@ -583,6 +536,7 @@ def start_experiment(par):
                    par["GENERATE_TB_PER_STEPS"],
                    wavtokenizer_model,
                    cb,
+                   kept_ids,
                    N_SITES,
                    n_states,
                    device,

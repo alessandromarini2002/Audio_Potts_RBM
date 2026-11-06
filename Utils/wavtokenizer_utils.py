@@ -4,6 +4,7 @@ import torch
 import torchaudio
 from omegaconf import OmegaConf
 from tqdm import tqdm
+import re
 
 # Aggiungiamo la cartella WavTokenizer al path di Python per poter importare i suoi moduli
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,6 +20,10 @@ from encoder.utils import convert_audio
 from decoder.pretrained import WavTokenizer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def natural_keys(text):
+    """Converte una stringa in una lista di stringhe e interi per il natural sort."""
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
 
 def load_config(config_path):
     """Carica il file di configurazione YAML."""
@@ -69,11 +74,11 @@ def reconstruct_with_wavtokenizer(wav_tensor, model):
 def extract_audio_tokens(audio_dir, model, device, target_sr=24000):
     """
     Scansiona una cartella di file audio, estrae i token discreti per ciascuno
-    e restituisce un tensore della forma (n_samples, 120) pronto per la Potts RBM.
+    e restituisce un tensore della forma (n_samples, 40) pronto per la Potts RBM.
     """
     valid_extensions = ('.wav', '.mp3', '.flac', '.ogg')
     
-    filenames = [os.path.abspath(os.path.join(audio_dir, f)) for f in sorted(os.listdir(audio_dir)) if f.lower().endswith(valid_extensions)]
+    filenames = [os.path.abspath(os.path.join(audio_dir, f)) for f in sorted(os.listdir(audio_dir), key=natural_keys) if f.lower().endswith(valid_extensions)]
     
     all_indices = []
     
@@ -99,7 +104,6 @@ def extract_audio_tokens(audio_dir, model, device, target_sr=24000):
    # Imposta la dimensione fissa richiesta dalla RBM (40 siti)
     target_length = 40
     processed_indices = []
-    masks = [] # Lista per le maschere
     
     for tensor in all_indices:
         orig_len = tensor.shape[0]
@@ -107,17 +111,11 @@ def extract_audio_tokens(audio_dir, model, device, target_sr=24000):
             # Aggiunge padding con zeri se il tensore è più corto di 40
             pad_size = target_length - orig_len
             tensor = torch.nn.functional.pad(tensor, (0, pad_size), value=0)
-            # La maschera vale 1 per i token reali, 0 sul padding
-            mask = torch.cat([torch.ones(orig_len), torch.zeros(pad_size)])
         elif orig_len > target_length:
-            # Tronca se il tensore è più lungo di 48
+            # Tronca se il tensore è più lungo di 40
             tensor = tensor[:target_length]
-            mask = torch.ones(target_length)
-        else:
-            mask = torch.ones(target_length)    
             
         processed_indices.append(tensor)
-        masks.append(mask)
         
-    # Restituisce sia i tensori impilati con forma (n_samples, 40) che le maschere corrispondenti
-    return torch.stack(processed_indices, dim=0), torch.stack(masks, dim=0)
+    # Restituisce i tensori impilati con forma (n_samples, 40)
+    return torch.stack(processed_indices, dim=0)
