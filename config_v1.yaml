@@ -1,0 +1,32 @@
+# RBM_latent_v1.py -- experiment config (WavTokenizer small 40 tok/s + Potts RBM)
+# Run: python RBM_latent_v1.py config_v1.yaml
+
+NOTE: "v1: corrected version "
+EXPERIMENT_ID: "v1_001"
+LOG_PATH: "RUNS/RBM_WavTokenizer"
+DATA_DIR: "DATA/archive/happy/"
+
+WAVTOKENIZER_CONF_FILE: "WavTokenizer/configs/wavtokenizer_smalldata_frame40_3s_nq1_code4096_dim512_kmeans200_attn.yaml"
+WAVTOKENIZER_CKPT_FILE: "WavTokenizer/ckpt/WavTokenizer_small_600_24k_4096.ckpt"
+
+VOCABULARY: reduced      # only the codewords actually used in DATA_DIR (lossless); "full" = all 4096
+SEED: 42
+N_HIDDEN: 512
+N_EPOCHS: 500           # increased
+LR: 0.02                # increased
+BATCH_SIZE: 16
+K_TRAIN: 8              # reduced
+PERSISTENT_CD: true
+WEIGHT_DECAY: 0.0001
+W_INIT: fixed
+W_INIT_SCALE: 0.01
+INIT_BIAS: true
+PRUNE: false             # Keep False!
+PRUNE_WARMUP_EPOCHS: 5
+PRUNE_END_EPOCH: 25
+PRUNE_EVERY: 3
+PRUNE_M_FINAL: 40
+SAMPLING: cleanup
+EVAL_GIBBS_STEPS: 100
+GENERATE_TB_PER_STEPS: 10  # number of audio samples per generation (fixed seeds)
+GENERATE_EVERY: 50         # checkpoint + audio samples every N epochs (and at the last epoch)
