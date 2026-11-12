@@ -460,7 +460,7 @@ def start_experiment(par):
 
     # load or extract codewords
     # silence-padded codewords: separate cache file from the old zero-padded X2_idx.pt
-    codewords_path = os.path.join(par["DATA_DIR"], "X_idx_silencepad.pt")
+    codewords_path = os.path.join("DATA/archive", "X_idx_happy_silencepad.pt")
     if os.path.isfile(codewords_path):
         print("Loading precomputed codewords... ", end="")
         X_idx = torch.load(codewords_path)
@@ -525,7 +525,7 @@ def start_experiment(par):
                               m_final=par["PRUNE_M_FINAL"])
 
     eval_steps = par["EVAL_GIBBS_STEPS"]
-    gen_seeds = random.Random(par["SEED"]).sample(range(1000), par["GENERATE_TB_PER_STEPS"])
+    gen_seeds = random.Random(par["SEED"]).sample(range(20000), par["GENERATE_TB_PER_STEPS"])
 
     def periodic_(epoch):
         """Every GENERATE_EVERY epochs (and at the last one): checkpoint + audio samples to TB."""
