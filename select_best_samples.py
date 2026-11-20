@@ -43,7 +43,7 @@ def extract_dnsmos_ovrl(wav_16k: np.ndarray) -> float:
     ).flatten()
     if dns_arr.size == 0:
       return 0.0
-    # L'ultimo elemento corrisponde tipicamente al punteggio complessivo OVRL
+    # L'ultimo elemento corrisponde al punteggio complessivo OVRL
     return float(dns_arr[-1])
 
 

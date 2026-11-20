@@ -19,15 +19,15 @@ EPOCH_DIR = Path(
 )
 OUT_DIR = Path(f"selected_samples/multiclass_{EXP_NAME}_epoch{EPOCH}")
 
-# Ripartizione dei 10 campioni sulle 4 classi (somma = 10)
+# 10 campioni per classe
 PER_CLASS_QUOTA = {
-    "dog": 3,
-    "happy": 3,
-    "stop": 2,
-    "yes": 2,
+    "dog": 10,
+    "happy": 10,
+    "stop": 10,
+    "yes": 10,
 }
 
-CANDIDATES_PER_CLASS = 30
+CANDIDATES_PER_CLASS = 40
 BATCH_SIZE = 16
 AST_WEIGHT = 0.7
 DNSMOS_WEIGHT = 0.3
